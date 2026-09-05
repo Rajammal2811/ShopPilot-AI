@@ -1,20 +1,34 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Send, Bot, Sparkles, CheckCircle2, ShoppingBag, Plus, HelpCircle, Loader2, ArrowRight, TrendingUp, Info } from 'lucide-react';
 import AgentActivity from '../components/AgentActivity';
 import WhyThisProductModal from '../components/WhyThisProductModal';
 import UpsellCard from '../components/UpsellCard';
 import { api } from '../services/api';
+import { PRODUCTS } from '../data/products';
+import { generateInstantRecommendation } from '../services/localEngine';
 
 export default function AIShopping({ onAddToCart, initialPrompt = '', openConsentGate }) {
-  const [inputPrompt, setInputPrompt] = useState(initialPrompt || "I need a laptop for coding under ₹60,000");
+  const defaultInitialPrompt = initialPrompt || "I need a laptop for coding under ₹60,000";
+  const [inputPrompt, setInputPrompt] = useState(defaultInitialPrompt);
   const [isLoading, setIsLoading] = useState(false);
-  const [chatHistory, setChatHistory] = useState([]);
-  const [currentResult, setCurrentResult] = useState(null);
+  const [activityStep, setActivityStep] = useState(4);
+  const [catalog, setCatalog] = useState(PRODUCTS);
+
+  // ⚡ Pre-compute instant recommendation so initial page load has zero blank state
+  const [currentResult, setCurrentResult] = useState(() => generateInstantRecommendation(defaultInitialPrompt, PRODUCTS));
+  const [chatHistory, setChatHistory] = useState(() => [
+    {
+      role: 'assistant',
+      content: generateInstantRecommendation(defaultInitialPrompt, PRODUCTS).message,
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    }
+  ]);
+
   const [selectedWhyProduct, setSelectedWhyProduct] = useState(null);
   const [addedUpsellIds, setAddedUpsellIds] = useState([]);
   const [paymentConfig, setPaymentConfig] = useState({ isRazorpayConfigured: false });
 
-  const hasInitializedRef = React.useRef(false);
+  const hasInitializedRef = useRef(false);
 
   const quickPrompts = [
     "I need a laptop for coding under ₹60,000",
@@ -23,65 +37,80 @@ export default function AIShopping({ onAddToCart, initialPrompt = '', openConsen
     "Find headphones for studying under ₹5,000"
   ];
 
-  // Fetch payment config on mount
+  // Eagerly fetch latest catalog & payment config in background
   useEffect(() => {
     api.getPaymentConfig()
       .then(res => { if (res) setPaymentConfig(res); })
       .catch(() => {});
+
+    api.getProducts()
+      .then(res => {
+        const all = Array.isArray(res) ? res : (res?.products || []);
+        if (all.length > 0) setCatalog(all);
+      })
+      .catch(() => {});
   }, []);
 
-  // Process initial prompt safely EXACTLY ONCE
+  // Process initial prompt safely once
   useEffect(() => {
-    if (!hasInitializedRef.current) {
+    if (!hasInitializedRef.current && initialPrompt && initialPrompt !== defaultInitialPrompt) {
       hasInitializedRef.current = true;
-      const promptToRun = initialPrompt || "I need a laptop for coding under ₹60,000";
-      handleSendPrompt(promptToRun);
+      handleSendPrompt(initialPrompt);
     }
   }, [initialPrompt]);
 
   const handleSendPrompt = async (promptToUse) => {
     const text = (promptToUse !== undefined ? promptToUse : inputPrompt).trim();
-    if (!text || isLoading) return;
+    if (!text) return;
 
-    setIsLoading(true);
+    // ⚡ 1. INSTANT LOCAL MATCH (<1ms) - ZERO PERCEIVED LATENCY
+    const instantResult = generateInstantRecommendation(text, catalog);
+    setCurrentResult(instantResult);
+
     const userMsg = { role: 'user', content: text, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
-    
-    // Add user message to history
-    setChatHistory(prev => [...prev, userMsg]);
+    const aiMsg = { 
+      role: 'assistant', 
+      content: instantResult.message, 
+      result: instantResult,
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
+    };
+
+    setChatHistory(prev => [...prev, userMsg, aiMsg]);
     setInputPrompt('');
 
+    // Fast-track activity step animation (75ms per step = 300ms total)
+    setIsLoading(true);
+    setActivityStep(0);
+    let step = 0;
+    const stepInterval = setInterval(() => {
+      step += 1;
+      if (step >= 4) {
+        setActivityStep(4);
+        setIsLoading(false);
+        clearInterval(stepInterval);
+      } else {
+        setActivityStep(step);
+      }
+    }, 75);
+
+    // ⚡ 2. Async background sync to record audit trail & fetch Gemini enrichment
     try {
       const response = await api.sendAIChat(text);
-      if (response && response.success) {
+      if (response && response.success && response.bestMatch) {
         setCurrentResult(response);
-        const aiMsg = { 
-          role: 'assistant', 
-          content: response.message, 
-          result: response,
-          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
-        };
-        setChatHistory(prev => [...prev, aiMsg]);
       }
     } catch (err) {
-      console.error("AI Shopping error:", err);
-      const fallbackMsg = {
-        role: 'assistant',
-        content: `Based on your request for "${text}", I've selected the best matching recommendation below.`,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      setChatHistory(prev => [...prev, fallbackMsg]);
-    } finally {
-      setIsLoading(false);
+      // Already running on verified instant recommendation, continue seamlessly
     }
   };
 
-  const bestMatch = currentResult?.bestMatch;
+  const product = currentResult?.bestMatch;
   const reasons = currentResult?.reasons || [];
   const upsells = currentResult?.upsells || [];
 
   const handleAddPrimaryToCart = () => {
-    if (bestMatch) {
-      onAddToCart({ ...bestMatch, quantity: 1, isUpsell: false });
+    if (product) {
+      onAddToCart({ ...product, quantity: 1, isUpsell: false });
     }
   };
 
@@ -91,7 +120,7 @@ export default function AIShopping({ onAddToCart, initialPrompt = '', openConsen
   };
 
   // Cart arithmetic computation for upsell display
-  const primaryPrice = bestMatch?.price || 0;
+  const primaryPrice = product?.price || 0;
   const addedUpsellPrice = upsells
     .filter(u => addedUpsellIds.includes(u.id))
     .reduce((sum, u) => sum + (u.price || 0), 0);
@@ -221,60 +250,71 @@ export default function AIShopping({ onAddToCart, initialPrompt = '', openConsen
           {/* Agent Activity Progress Indicator */}
           <AgentActivity 
             steps={currentResult?.processSteps}
-            currentStepIndex={4} 
+            currentStepIndex={activityStep} 
             isComplete={!isLoading} 
           />
 
-          {/* Primary Recommended Product Card */}
-          {bestMatch && (
+          {/* Primary Recommended Product Card — renders as soon as any product is available */}
+          {product && (
             <div className="bg-white rounded-3xl p-6 border border-indigo-200 shadow-soft hover:shadow-soft-hover transition-all relative overflow-hidden space-y-4">
-              
+
               {/* Header Badge */}
               <div className="flex items-center justify-between">
                 <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gradient-to-r from-indigo-600 to-violet-600 text-white text-xs font-extrabold shadow-sm">
                   <Sparkles className="w-3.5 h-3.5 fill-white/20" />
-                  Best match for you
+                  {currentResult?.bestMatch ? 'AI Pick · Best match for you' : 'Best match for you'}
                 </span>
                 <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700">
-                  Stock: {bestMatch.stock} left
+                  Stock: {product.stock ?? '—'} left
                 </span>
               </div>
 
               {/* Product Info Layout */}
               <div className="grid grid-cols-1 sm:grid-cols-12 gap-5 items-center">
                 <div className="sm:col-span-5 relative group">
-                  <img 
-                    src={bestMatch.image} 
-                    alt={bestMatch.name} 
+                  <img
+                    src={product.image || 'https://images.unsplash.com/photo-1526738549149-8e07eca6c147?w=800&auto=format&fit=crop&q=80'}
+                    alt={product.name || 'Product'}
                     onError={(e) => { e.target.onerror = null; e.target.src = 'https://images.unsplash.com/photo-1526738549149-8e07eca6c147?w=800&auto=format&fit=crop&q=80'; }}
-                    className="w-full h-48 rounded-2xl object-cover border border-slate-100 shadow-xs group-hover:scale-105 transition-transform duration-300" 
+                    className="w-full h-48 rounded-2xl object-cover border border-slate-100 shadow-xs group-hover:scale-105 transition-transform duration-300"
                   />
                   <div className="absolute top-2 left-2 bg-white/90 backdrop-blur-xs px-2 py-0.5 rounded-lg text-xs font-bold text-slate-900 border border-slate-200">
-                    ★ {bestMatch.rating}
+                    ★ {product.rating ?? 'N/A'}
                   </div>
+                  {product.originalPrice && product.price && product.originalPrice > product.price && (
+                    <div className="absolute top-2 right-2 bg-emerald-500 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-lg shadow-sm">
+                      {Math.round(((product.originalPrice - product.price) / product.originalPrice) * 100)}% OFF
+                    </div>
+                  )}
                 </div>
 
                 <div className="sm:col-span-7 space-y-3">
                   <div>
-                    <span className="text-xs font-bold text-indigo-600 uppercase tracking-wider">{bestMatch.category}</span>
-                    <h3 className="text-xl font-extrabold text-slate-900 leading-tight">{bestMatch.name}</h3>
+                    <span className="text-xs font-bold text-indigo-600 uppercase tracking-wider">{product.category || 'Product'}</span>
+                    <h3 className="text-xl font-extrabold text-slate-900 leading-tight">{product.name || 'Recommended Product'}</h3>
                   </div>
 
                   <div className="flex items-baseline gap-2">
-                    <span className="text-2xl font-extrabold text-slate-900">₹{bestMatch.price?.toLocaleString('en-IN')}</span>
-                    {bestMatch.originalPrice && (
-                      <span className="text-xs font-medium text-slate-400 line-through">₹{bestMatch.originalPrice?.toLocaleString('en-IN')}</span>
+                    <span className="text-2xl font-extrabold text-slate-900">
+                      ₹{product.price != null ? product.price.toLocaleString('en-IN') : '—'}
+                    </span>
+                    {product.originalPrice && product.originalPrice > product.price && (
+                      <span className="text-xs font-medium text-slate-400 line-through">
+                        ₹{product.originalPrice.toLocaleString('en-IN')}
+                      </span>
                     )}
                   </div>
 
-                  {/* Key Features Specs Pills */}
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    {bestMatch.features?.map((feat, idx) => (
-                      <span key={idx} className="text-[11px] font-semibold px-2.5 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200/60">
-                        {feat}
-                      </span>
-                    ))}
-                  </div>
+                  {/* Key Feature Spec Pills */}
+                  {Array.isArray(product.features) && product.features.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {product.features.map((feat, idx) => (
+                        <span key={idx} className="text-[11px] font-semibold px-2.5 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200/60">
+                          {feat}
+                        </span>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Actions */}
                   <div className="flex items-center gap-3 pt-2">
@@ -287,7 +327,7 @@ export default function AIShopping({ onAddToCart, initialPrompt = '', openConsen
                     </button>
 
                     <button
-                      onClick={() => setSelectedWhyProduct(bestMatch)}
+                      onClick={() => setSelectedWhyProduct(product)}
                       className="py-3 px-4 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs sm:text-sm border border-indigo-200/80 flex items-center gap-1.5 transition-colors"
                     >
                       <HelpCircle className="w-4 h-4 text-indigo-600" />

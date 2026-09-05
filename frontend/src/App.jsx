@@ -108,6 +108,9 @@ export default function App() {
           // Open DEMO PAYMENT MODE modal
           setIsDemoPaymentOpen(true);
         }
+      } else {
+        setIsConsentGateOpen(false);
+        setPaymentFailureState({ reason: res?.message || "Failed to create payment order." });
       }
     } catch (err) {
       console.error("Order creation error:", err);

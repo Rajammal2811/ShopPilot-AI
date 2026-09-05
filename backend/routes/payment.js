@@ -5,6 +5,7 @@ const router = express.Router();
 
 // GET /api/payment/config
 router.get('/config', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   res.json({
     success: true,
     isRazorpayConfigured: isRazorpayConfigured(),
@@ -15,30 +16,35 @@ router.get('/config', (req, res) => {
 
 // POST /api/payment/create-order
 router.post('/create-order', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   try {
-    const { items, customer } = req.body;
+    const { items, customer } = req.body || {};
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ success: false, message: "Cart cannot be empty" });
     }
 
     const orderResult = await createOrder(items, customer || {});
-    res.json({ success: true, ...orderResult });
+    return res.status(200).json({ success: true, ...orderResult });
   } catch (err) {
-    res.status(400).json({ success: false, message: err.message });
+    console.error("Order creation error:", err.message);
+    return res.status(400).json({ success: false, message: err.message || "Failed to create payment order" });
   }
 });
 
 // POST /api/payment/verify
 router.post('/verify', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   try {
-    const verificationResult = await verifyPayment(req.body);
+    const payload = req.body || {};
+    const verificationResult = await verifyPayment(payload);
     if (verificationResult.success) {
-      res.json({ success: true, ...verificationResult });
+      return res.status(200).json({ success: true, ...verificationResult });
     } else {
-      res.status(400).json({ success: false, ...verificationResult });
+      return res.status(200).json({ success: false, ...verificationResult });
     }
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("Payment verification error:", err.message);
+    return res.status(500).json({ success: false, message: err.message || "Payment verification failed" });
   }
 });
 

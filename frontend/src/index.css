@@ -40,3 +40,25 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #94A3B8;
 }
+
+/* Fast Rendering & Hardware Acceleration Optimizations */
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+img {
+  content-visibility: auto;
+}
+
+.gpu-accelerated {
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  perspective: 1000px;
+}
+
+.fast-transition {
+  transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  transition-duration: 150ms;
+}
+

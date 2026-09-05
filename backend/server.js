@@ -20,8 +20,9 @@ const PORT = process.env.PORT || 5000;
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-session-id']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-session-id', 'Accept']
 }));
+app.options('*', cors());
 app.use(express.json());
 
 // Optional MongoDB Connection
@@ -33,8 +34,9 @@ if (process.env.MONGODB_URI) {
   console.log('No MONGODB_URI provided. Running with fast in-memory store persistence.');
 }
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
+// Health check handler (always returns JSON)
+const healthHandler = (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
   res.json({
     status: 'online',
     app: 'ShopPilot AI API',
@@ -44,28 +46,47 @@ app.get('/api/health', (req, res) => {
     razorpayConfigured: Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET),
     mongoConfigured: Boolean(process.env.MONGODB_URI)
   });
-});
+};
 
-// API Routes
-app.use('/api/products', productsRouter);
-app.use('/api/ai', aiRouter);
-app.use('/api/cart', cartRouter);
-app.use('/api/payment', paymentRouter);
-app.use('/api/orders', ordersRouter);
-app.use('/api/audit', auditRouter);
-app.use('/api/analytics', analyticsRouter);
+app.get('/api/health', healthHandler);
+app.get('/health', healthHandler);
 
-// 404 Route handler
+// API Routes - Register on both /api and root '' so serverless rewrites and proxies never 404
+const registerRoutes = (prefix = '/api') => {
+  app.use(`${prefix}/products`, productsRouter);
+  app.use(`${prefix}/ai`, aiRouter);
+  app.use(`${prefix}/cart`, cartRouter);
+  app.use(`${prefix}/payment`, paymentRouter);
+  app.use(`${prefix}/orders`, ordersRouter);
+  app.use(`${prefix}/audit`, auditRouter);
+  app.use(`${prefix}/analytics`, analyticsRouter);
+};
+
+registerRoutes('/api');
+registerRoutes('');
+
+// 404 Route handler - Always return strict JSON, never HTML
 app.use((req, res) => {
-  res.status(404).json({ success: false, message: `Route ${req.originalUrl} not found` });
+  res.setHeader('Content-Type', 'application/json');
+  res.status(404).json({ success: false, message: `Route ${req.method} ${req.originalUrl} not found` });
 });
 
-// Global Error Handler
+// Global Error Handler - Always return strict JSON, never HTML
 app.use((err, req, res, next) => {
   console.error('Unhandled Server Error:', err);
-  res.status(500).json({ success: false, message: 'Internal Server Error', error: err.message });
+  res.setHeader('Content-Type', 'application/json');
+  res.status(err.status || 500).json({ 
+    success: false, 
+    message: err.message || 'Internal Server Error',
+    error: process.env.NODE_ENV === 'production' ? undefined : err.message 
+  });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 ShopPilot AI Backend Server running on http://localhost:${PORT}`);
-});
+// Start listener for standalone/local dev execution
+if (process.env.NODE_ENV !== 'test' && !process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`🚀 ShopPilot AI Backend Server running on http://localhost:${PORT}`);
+  });
+}
+
+export default app;
